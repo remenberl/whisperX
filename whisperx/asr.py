@@ -6,6 +6,7 @@ import ctranslate2
 import faster_whisper
 import numpy as np
 import torch
+from tqdm.contrib import concurrent as tqdm_concurrent
 from transformers import Pipeline
 from transformers.pipelines.pt_utils import PipelineIterator
 
@@ -255,18 +256,16 @@ class FasterWhisperPipeline(Pipeline):
         final_iterator = PipelineIterator(model_iterator, self.postprocess, postprocess_params)
         return final_iterator
 
+    def detect_segment_language(self, audio: np.ndarray, seg):
+        f1 = int(seg['start'] * SAMPLE_RATE)
+        f2 = int(seg['end'] * SAMPLE_RATE)
+        return self.detect_language(audio[f1:f2])
+
     def transcribe(
-        self, audio: Union[str, np.ndarray], batch_size=None, num_workers=0, language=None, task=None, chunk_size=30, print_progress = False, combined_progress=False
-    ) -> TranscriptionResult:
+        self, audio: Union[str, np.ndarray], batch_size=None, num_threads=16, num_workers=0, language=None, task=None, chunk_size=30, print_progress = False, combined_progress=False
+    ) -> list[TranscriptionResult]:
         if isinstance(audio, str):
             audio = load_audio(audio)
-
-        def data(audio, segments):
-            for seg in segments:
-                f1 = int(seg['start'] * SAMPLE_RATE)
-                f2 = int(seg['end'] * SAMPLE_RATE)
-                # print(f2-f1)
-                yield {'inputs': audio[f1:f2]}
 
         vad_segments = self.vad_model({"waveform": torch.from_numpy(audio).unsqueeze(0), "sample_rate": SAMPLE_RATE})
         vad_segments = merge_chunks(
@@ -275,6 +274,40 @@ class FasterWhisperPipeline(Pipeline):
             onset=self._vad_params["vad_onset"],
             offset=self._vad_params["vad_offset"],
         )
+
+        vad_segments_per_lang = {}
+        if self.tokenizer:
+            vad_segments_per_lang[language] = vad_segments
+        else:
+            print("Detect language:")
+            results = tqdm_concurrent.thread_map(self.detect_segment_language,
+                                                 [audio]*len(vad_segments),
+                                                 vad_segments,
+                                                 max_workers=num_threads)
+            for idx, lang in enumerate(results):
+                if lang in vad_segments_per_lang:
+                    vad_segments_per_lang[lang].append(vad_segments[idx])
+                else:
+                    vad_segments_per_lang[lang] = [vad_segments[idx]]
+        results = []
+        for lang, vad_segments in vad_segments_per_lang.items():
+            results.append(
+                self.transcribe_per_lang(audio, vad_segments, batch_size,
+                                         num_workers, lang, task,
+                                         chunk_size, print_progress,
+                                         combined_progress))
+        return results
+
+    def transcribe_per_lang(
+        self, audio: np.ndarray, vad_segments, batch_size=None, num_workers=0, language=None, task=None, chunk_size=30, print_progress = False, combined_progress=False
+    ) -> TranscriptionResult:
+        def data(audio, segments):
+            for seg in segments:
+                f1 = int(seg['start'] * SAMPLE_RATE)
+                f2 = int(seg['end'] * SAMPLE_RATE)
+                # print(f2-f1)
+                yield {'inputs': audio[f1:f2]}
+
         if self.tokenizer is None:
             language = language or self.detect_language(audio)
             task = task or "transcribe"
@@ -328,13 +361,13 @@ class FasterWhisperPipeline(Pipeline):
 
 
     def detect_language(self, audio: np.ndarray):
-        if audio.shape[0] < N_SAMPLES:
-            print("Warning: audio is shorter than 30s, language detection may be inaccurate.")
+        #if audio.shape[0] < N_SAMPLES:
+        #    print("Warning: audio is shorter than 30s, language detection may be inaccurate.")
         segment = log_mel_spectrogram(audio[: N_SAMPLES],
                                       padding=0 if audio.shape[0] >= N_SAMPLES else N_SAMPLES - audio.shape[0])
         encoder_output = self.model.encode(segment)
         results = self.model.model.detect_language(encoder_output)
         language_token, language_probability = results[0][0]
         language = language_token[2:-2]
-        print(f"Detected language: {language} ({language_probability:.2f}) in first 30s of audio...")
+        #print(f"Detected language: {language} ({language_probability:.2f}) in first 30s of audio...")
         return language
