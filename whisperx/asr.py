@@ -1,6 +1,6 @@
 import os
 import warnings
-from typing import List, Union, Optional, NamedTuple
+from typing import Callable, List, Union, Optional, NamedTuple
 
 import ctranslate2
 import faster_whisper
@@ -189,7 +189,7 @@ class FasterWhisperPipeline(Pipeline):
             model,
             vad,
             vad_params: dict,
-            options : NamedTuple,
+            options: NamedTuple,
             tokenizer=None,
             device: Union[int, str, "torch.device"] = -1,
             framework = "pt",
@@ -262,7 +262,10 @@ class FasterWhisperPipeline(Pipeline):
         return self.detect_language(audio[f1:f2])
 
     def transcribe(
-        self, audio: Union[str, np.ndarray], batch_size=None, num_threads=16, num_workers=0, language=None, task=None, chunk_size=30, print_progress = False, combined_progress=False
+        self, audio: Union[str, np.ndarray], batch_size=None, num_threads=16,
+        num_workers=0, language=None, task=None, chunk_size=30,
+        print_progress=False, combined_progress=False,
+        get_prompt_per_lang: Optional[Callable[[str], str]] = None
     ) -> list[TranscriptionResult]:
         if isinstance(audio, str):
             audio = load_audio(audio)
@@ -291,6 +294,13 @@ class FasterWhisperPipeline(Pipeline):
                     vad_segments_per_lang[lang] = [vad_segments[idx]]
         results = []
         for lang, vad_segments in vad_segments_per_lang.items():
+            if get_prompt_per_lang:
+                prompt = get_prompt_per_lang(lang)
+                new_asr_options = self.options._asdict()
+                new_asr_options["initial_prompt"] = prompt
+                new_options = faster_whisper.transcribe.TranscriptionOptions(
+                    **new_asr_options)
+                self.options = new_options
             results.append(
                 self.transcribe_per_lang(audio, vad_segments, batch_size,
                                          num_workers, lang, task,
