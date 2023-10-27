@@ -166,7 +166,8 @@ def cli():
         # >> VAD & ASR
         print(">>Performing transcription...")
         result = model.transcribe(audio, batch_size=batch_size, chunk_size=chunk_size, print_progress=print_progress)
-        results.append((result, audio_path))
+        for r in result:
+            results.append((r, audio_path))
 
     # Unload Whisper and VAD
     del model
@@ -217,6 +218,8 @@ def cli():
     for result, audio_path in results:
         result["language"] = align_language
         writer(result, audio_path, writer_args)
+    for seg in result["segments"]:
+        print(seg["text"])
 
 if __name__ == "__main__":
     cli()

@@ -396,7 +396,12 @@ class FasterWhisperPipeline(Pipeline):
                                       padding=0 if audio.shape[0] >= N_SAMPLES else N_SAMPLES - audio.shape[0])
         encoder_output = self.model.encode(segment)
         results = self.model.model.detect_language(encoder_output)
-        language_token, language_probability = results[0][0]
-        language = language_token[2:-2]
+        language_token, _ = results[0][0]
+        first_language = language_token[2:-2]
+        second_language_token, second_language_probability = results[0][1]
+        second_language = second_language_token[2:-2]
+        # In bilingual setting, prefers non-English output.
+        if first_language == "en" and second_language_probability > 0.4:
+            return second_language
         # print(f"Detected language: {language} ({language_probability:.2f}) in first 30s of audio...")
-        return language
+        return first_language
