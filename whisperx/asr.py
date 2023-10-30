@@ -25,12 +25,12 @@ def find_numeral_symbol_tokens(tokenizer):
     return numeral_symbol_tokens
 
 
-def load_model(whisper_arch,
+def load_model(i18n_whisper_arch,
+               en_whisper_arch,
                device,
                device_index=0,
                compute_type="float16",
                asr_options=None,
-               language: Optional[str] = None,
                vad_options=None,
                model=None,
                task="transcribe",
@@ -49,21 +49,20 @@ def load_model(whisper_arch,
         A Whisper pipeline.
     '''
 
-    if whisper_arch.endswith(".en"):
-        language = "en"
 
-    model = WhisperModel(whisper_arch,
+    i18n_model = WhisperModel(i18n_whisper_arch,
                          device=device,
                          device_index=device_index,
                          compute_type=compute_type,
                          download_root=download_root,
                          cpu_threads=threads)
-    if language is not None:
-        tokenizer = faster_whisper.tokenizer.Tokenizer(
-            model.hf_tokenizer, model.model.is_multilingual, task=task, language=language)
-    else:
-        # print("No language specified, language will be first be detected for each audio file (increases inference time).")
-        tokenizer = None
+    en_model = WhisperModel(en_whisper_arch,
+                            device=device,
+                            device_index=device_index,
+                            compute_type=compute_type,
+                            download_root=download_root,
+                            cpu_threads=threads)
+    tokenizer = None
 
     default_asr_options = {
         "beam_size": 5,
@@ -111,11 +110,11 @@ def load_model(whisper_arch,
         device), use_auth_token=None, **default_vad_options)
 
     return FasterWhisperPipeline(
-        model=model,
+        i18n_model=i18n_model,
+        en_model=en_model,
         vad=vad_model,
         options=default_asr_options,
         tokenizer=tokenizer,
-        language=language,
         suppress_numerals=suppress_numerals,
         vad_params=default_vad_options,
     )
@@ -153,14 +152,20 @@ class WhisperModel(faster_whisper.WhisperModel):
             encoder_output,
             [prompt] * batch_size,
             length_penalty=options.length_penalty,
+            repetition_penalty=options.repetition_penalty,
+            no_repeat_ngram_size=options.no_repeat_ngram_size,
             max_length=self.max_length,
+            return_scores=True,
+            return_no_speech_prob=True,
             suppress_blank=options.suppress_blank,
             suppress_tokens=options.suppress_tokens,
+            max_initial_timestamp_index=max_initial_timestamp_index,
+            #beam_size=options.beam_size,
         )
 
         tokens_batch = [x.sequences_ids[0] for x in result]
 
-        def decode_batch(tokens: List[List[int]]) -> str:
+        def decode_batch(tokens: List[List[int]]) -> List[str]:
             res = []
             for tk in tokens:
                 res.append([token for token in tk if token < tokenizer.eot])
@@ -169,7 +174,13 @@ class WhisperModel(faster_whisper.WhisperModel):
 
         text = decode_batch(tokens_batch)
 
-        return text
+        logprobs = []
+        for tokens in tokens_batch:
+            seq_len = len(tokens)
+            cum_logprob = result[0].scores[0] * (seq_len**options.length_penalty)
+            avg_logprob = cum_logprob / (seq_len + 1)
+            logprobs.append(avg_logprob)
+        return text, logprobs
 
     def encode(self, features: np.ndarray) -> ctranslate2.StorageView:
         # When the model is running on multiple GPUs, the encoder output should be moved
@@ -194,7 +205,8 @@ class FasterWhisperPipeline(Pipeline):
 
     def __init__(
             self,
-            model,
+            i18n_model,
+            en_model,
             vad,
             vad_params: dict,
             options: NamedTuple,
@@ -205,7 +217,8 @@ class FasterWhisperPipeline(Pipeline):
             suppress_numerals: bool = False,
             **kwargs
     ):
-        self.model = model
+        self.i18n_model = i18n_model
+        self.en_model = en_model
         self.tokenizer = tokenizer
         self.options = options
         self.preset_language = language
@@ -247,7 +260,7 @@ class FasterWhisperPipeline(Pipeline):
     def _forward(self, model_inputs):
         outputs = self.model.generate_segment_batched(
             model_inputs['inputs'], self.tokenizer, self.options)
-        return {'text': outputs}
+        return {'text': outputs[0], 'logprob': outputs[1]}
 
     def postprocess(self, model_outputs):
         return model_outputs
@@ -339,6 +352,7 @@ class FasterWhisperPipeline(Pipeline):
         if self.tokenizer is None:
             language = language or self.detect_language(audio)
             task = task or "transcribe"
+            self.model = self.en_model if language == "en" else self.i18n_model
             self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
                                                                 self.model.model.is_multilingual, task=task,
                                                                 language=language)
@@ -346,6 +360,7 @@ class FasterWhisperPipeline(Pipeline):
             language = language or self.tokenizer.language_code
             task = task or self.tokenizer.task
             if task != self.tokenizer.task or language != self.tokenizer.language_code:
+                self.model = self.en_model if language == "en" else self.i18n_model
                 self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
                                                                     self.model.model.is_multilingual, task=task,
                                                                     language=language)
@@ -368,13 +383,16 @@ class FasterWhisperPipeline(Pipeline):
                 percent_complete = base_progress / 2 if combined_progress else base_progress
                 print(f"Progress: {percent_complete:.2f}%...")
             text = out['text']
+            logprob = out['logprob']
             if batch_size in [0, 1, None]:
                 text = text[0]
+                logprob = logprob[0]
             segments.append(
                 {
                     "text": text,
                     "start": round(vad_segments[idx]['start'], 3),
-                    "end": round(vad_segments[idx]['end'], 3)
+                    "end": round(vad_segments[idx]['end'], 3),
+                    "score": logprob,
                 }
             )
 
@@ -394,8 +412,8 @@ class FasterWhisperPipeline(Pipeline):
         #    print("Warning: audio is shorter than 30s, language detection may be inaccurate.")
         segment = log_mel_spectrogram(audio[: N_SAMPLES],
                                       padding=0 if audio.shape[0] >= N_SAMPLES else N_SAMPLES - audio.shape[0])
-        encoder_output = self.model.encode(segment)
-        results = self.model.model.detect_language(encoder_output)
+        encoder_output = self.i18n_model.encode(segment)
+        results = self.i18n_model.model.detect_language(encoder_output)
         language_token, _ = results[0][0]
         first_language = language_token[2:-2]
         second_language_token, second_language_probability = results[0][1]
