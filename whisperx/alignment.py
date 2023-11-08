@@ -11,7 +11,7 @@ import torch
 import torchaudio
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 
-from .audio import SAMPLE_RATE, load_audio
+from .audio import N_SAMPLES, N_FRAMES, SAMPLE_RATE, TOKENS_PER_SECOND, load_audio
 from .utils import interpolate_nans
 from .types import AlignedTranscriptionResult, SingleSegment, SingleAlignedSegment, SingleWordSegment
 import nltk
@@ -460,3 +460,81 @@ def merge_words(segments, separator="|"):
         else:
             i2 += 1
     return words
+
+def merge_punctuations(alignment: List[dict], prepended: str, appended: str) -> None:
+    # merge prepended punctuations
+    i = len(alignment) - 2
+    j = len(alignment) - 1
+    while i >= 0:
+        previous = alignment[i]
+        following = alignment[j]
+        if previous["word"].startswith(" ") and previous["word"].strip() in prepended:
+            # prepend it to the following word
+            following["word"] = previous["word"] + following["word"]
+            following["tokens"] = previous["tokens"] + following["tokens"]
+            previous["word"] = ""
+            previous["tokens"] = []
+        else:
+            j = i
+        i -= 1
+
+    # merge appended punctuations
+    i = 0
+    j = 1
+    while j < len(alignment):
+        previous = alignment[i]
+        following = alignment[j]
+        if not previous["word"].endswith(" ") and following["word"] in appended:
+            # append it to the previous word
+            previous["word"] = previous["word"] + following["word"]
+            previous["tokens"] = previous["tokens"] + following["tokens"]
+            following["word"] = ""
+            following["tokens"] = []
+        else:
+            i = j
+        j += 1
+
+def find_alignments(model, tokenizer, text_tokens, encoder_output, median_filter_width: int = 7):
+    num_frames = N_SAMPLES - N_FRAMES 
+    results = model.align(
+        encoder_output,
+        tokenizer.sot_sequence,
+        text_tokens,
+        num_frames,
+        median_filter_width=median_filter_width,
+    )
+    final_alignments = [] 
+    for i, result in enumerate(results): 
+        text_token_probs = result.text_token_probs
+
+        alignments = result.alignments
+        text_indices = np.array([pair[0] for pair in alignments])
+        time_indices = np.array([pair[1] for pair in alignments])
+
+        words, word_tokens = tokenizer.split_to_word_tokens(
+            text_tokens[i] + [tokenizer.eot]
+        )
+        word_boundaries = np.pad(np.cumsum([len(t) for t in word_tokens[:-1]]), (1, 0))
+        if len(word_boundaries) <= 1:
+            return []
+
+        jumps = np.pad(np.diff(text_indices), (1, 0), constant_values=1).astype(bool)
+        jump_times = time_indices[jumps] / TOKENS_PER_SECOND 
+        start_times = jump_times[word_boundaries[:-1]]
+        end_times = jump_times[word_boundaries[1:]]
+        word_probabilities = [
+            np.mean(text_token_probs[i:j])
+            for i, j in zip(word_boundaries[:-1], word_boundaries[1:])
+        ]
+
+        alignment = [
+            dict(
+                word=word, tokens=tokens, start=start, end=end, probability=probability
+            )
+            for word, tokens, start, end, probability in zip(
+                words, word_tokens, start_times, end_times, word_probabilities
+            )
+        ]
+        merge_punctuations(alignment, prepended="\"'“¿([{-", appended="\"'.。,，!！?？:：”)]}、")
+        final_alignments.append(alignment)
+    return final_alignments

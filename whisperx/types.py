@@ -1,4 +1,4 @@
-from typing import TypedDict, Optional, List
+from typing import TypedDict, Optional, List, Any
 
 
 class SingleWordSegment(TypedDict):
@@ -28,7 +28,9 @@ class SingleSegment(TypedDict):
     start: float
     end: float
     text: str
-    score: float
+    alignment: Any
+    active_duration: float
+    feature: Any 
 
 
 class SingleAlignedSegment(TypedDict):

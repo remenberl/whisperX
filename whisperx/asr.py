@@ -11,7 +11,8 @@ from transformers import Pipeline
 from transformers.pipelines.pt_utils import PipelineIterator
 
 from .audio import N_SAMPLES, SAMPLE_RATE, load_audio, log_mel_spectrogram
-from .vad import load_vad_model, merge_chunks
+from .alignment import find_alignments
+from .vad import load_vad_model, merge_chunks, merge_intervals
 from .types import TranscriptionResult, SingleSegment
 
 
@@ -51,11 +52,11 @@ def load_model(i18n_whisper_arch,
 
 
     i18n_model = WhisperModel(i18n_whisper_arch,
-                         device=device,
-                         device_index=device_index,
-                         compute_type=compute_type,
-                         download_root=download_root,
-                         cpu_threads=threads)
+                              device=device,
+                              device_index=device_index,
+                              compute_type=compute_type,
+                              download_root=download_root,
+                              cpu_threads=threads)
     en_model = WhisperModel(en_whisper_arch,
                             device=device,
                             device_index=device_index,
@@ -126,7 +127,7 @@ class WhisperModel(faster_whisper.WhisperModel):
     Currently only works in non-timestamp mode and fixed prompt for all samples in batch.
     '''
 
-    def generate_segment_batched(self, features: np.ndarray, tokenizer: faster_whisper.tokenizer.Tokenizer, options: faster_whisper.transcribe.TranscriptionOptions, encoder_output=None):
+    def generate_segment_batched(self, features: np.ndarray, tokenizer: faster_whisper.tokenizer.Tokenizer, options: faster_whisper.transcribe.TranscriptionOptions):
         batch_size = features.shape[0]
         all_tokens = []
         prompt_reset_since = 0
@@ -155,7 +156,6 @@ class WhisperModel(faster_whisper.WhisperModel):
             repetition_penalty=options.repetition_penalty,
             no_repeat_ngram_size=options.no_repeat_ngram_size,
             max_length=self.max_length,
-            return_scores=True,
             return_no_speech_prob=True,
             suppress_blank=options.suppress_blank,
             suppress_tokens=options.suppress_tokens,
@@ -173,14 +173,8 @@ class WhisperModel(faster_whisper.WhisperModel):
             return tokenizer.tokenizer.decode_batch(res)
 
         text = decode_batch(tokens_batch)
-
-        logprobs = []
-        for tokens in tokens_batch:
-            seq_len = len(tokens)
-            cum_logprob = result[0].scores[0] * (seq_len**options.length_penalty)
-            avg_logprob = cum_logprob / (seq_len + 1)
-            logprobs.append(avg_logprob)
-        return text, logprobs
+        alignments = find_alignments(self.model, tokenizer, tokens_batch, encoder_output)
+        return text, alignments
 
     def encode(self, features: np.ndarray) -> ctranslate2.StorageView:
         # When the model is running on multiple GPUs, the encoder output should be moved
@@ -251,16 +245,13 @@ class FasterWhisperPipeline(Pipeline):
             preprocess_kwargs["maybe_arg"] = kwargs["maybe_arg"]
         return preprocess_kwargs, {}, {}
 
-    def preprocess(self, audio):
-        audio = audio['inputs']
-        features = log_mel_spectrogram(
-            audio, padding=N_SAMPLES - audio.shape[0])
-        return {'inputs': features}
+    def preprocess(self, inputs):
+        return {'inputs': inputs['inputs']}
 
     def _forward(self, model_inputs):
         outputs = self.model.generate_segment_batched(
             model_inputs['inputs'], self.tokenizer, self.options)
-        return {'text': outputs[0], 'logprob': outputs[1]}
+        return {'text': outputs[0], 'alignment': outputs[1]}
 
     def postprocess(self, model_outputs):
         return model_outputs
@@ -286,7 +277,31 @@ class FasterWhisperPipeline(Pipeline):
     def detect_segment_language(self, audio: np.ndarray, seg):
         f1 = int(seg['start'] * SAMPLE_RATE)
         f2 = int(seg['end'] * SAMPLE_RATE)
-        return self.detect_language(audio[f1:f2])
+        languages = self.detect_language(audio[f1:f2], seg)
+        if len(languages) == 1:
+            return [seg]
+        segs_to_return = []
+        segs_to_split = [seg]
+        while segs_to_split:
+            new_segs_to_split = []
+            for seg in segs_to_split:
+                chunk_size = (seg["end"] - seg["start"]) / 2
+                subsegments = merge_intervals(seg["segments"], seg["weights"], chunk_size=chunk_size)
+                if len(subsegments) == 1:
+                    segs_to_return.append(seg)
+                    continue
+                for subseg in subsegments:
+                    f1 = int(subseg["start"] * SAMPLE_RATE)
+                    f2 = int(subseg["end"] * SAMPLE_RATE)
+                    languages = self.detect_language(audio[f1:f2], subseg)
+                    if len(languages) == 1 or subseg["end"] - subseg["start"] < 4:
+                        segs_to_return.append(subseg)
+                    else:
+                        new_segs_to_split.append(subseg)
+            segs_to_split = new_segs_to_split
+        segs_to_return.sort(key=lambda seg: seg["start"])
+        return segs_to_return
+
 
     def transcribe(
         self, audio: Union[str, np.ndarray], batch_size=None, num_threads=16,
@@ -305,7 +320,6 @@ class FasterWhisperPipeline(Pipeline):
             onset=self._vad_params["vad_onset"],
             offset=self._vad_params["vad_offset"],
         )
-
         vad_segments_per_lang = {}
         if self.tokenizer:
             vad_segments_per_lang[language] = vad_segments
@@ -316,11 +330,13 @@ class FasterWhisperPipeline(Pipeline):
                                                  vad_segments,
                                                  max_workers=num_threads,
                                                  disable=logging.root.level >= logging.INFO)
-            for idx, lang in enumerate(results):
-                if lang in vad_segments_per_lang:
-                    vad_segments_per_lang[lang].append(vad_segments[idx])
-                else:
-                    vad_segments_per_lang[lang] = [vad_segments[idx]]
+            for segments in results:
+                for seg in segments:
+                    lang = seg["language"][0]
+                    if lang in vad_segments_per_lang:
+                        vad_segments_per_lang[lang].append(seg)
+                    else:
+                        vad_segments_per_lang[lang] = [seg]
         results = []
         for lang, vad_segments in vad_segments_per_lang.items():
             logging.info(f"\tGetting prompts for {lang}")
@@ -343,14 +359,12 @@ class FasterWhisperPipeline(Pipeline):
     def transcribe_per_lang(
         self, audio: np.ndarray, vad_segments, batch_size=None, num_workers=0, language=None, task=None, chunk_size=30, print_progress=False, combined_progress=False
     ) -> TranscriptionResult:
-        def data(audio, segments):
+        def data(segments):
             for seg in segments:
-                f1 = int(seg['start'] * SAMPLE_RATE)
-                f2 = int(seg['end'] * SAMPLE_RATE)
-                yield {'inputs': audio[f1:f2]}
+                yield {'inputs': seg["feature"]}
 
         if self.tokenizer is None:
-            language = language or self.detect_language(audio)
+            language = language or self.detect_language(audio)[0]
             task = task or "transcribe"
             self.model = self.en_model if language == "en" else self.i18n_model
             self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
@@ -377,22 +391,33 @@ class FasterWhisperPipeline(Pipeline):
         segments: List[SingleSegment] = []
         batch_size = batch_size or self._batch_size
         total_segments = len(vad_segments)
-        for idx, out in enumerate(self.__call__(data(audio, vad_segments), batch_size=batch_size, num_workers=num_workers)):
+        for idx, out in enumerate(self.__call__(data(vad_segments), batch_size=batch_size, num_workers=num_workers)):
             if print_progress:
                 base_progress = ((idx + 1) / total_segments) * 100
                 percent_complete = base_progress / 2 if combined_progress else base_progress
                 print(f"Progress: {percent_complete:.2f}%...")
             text = out['text']
-            logprob = out['logprob']
+            alignment = out['alignment']
             if batch_size in [0, 1, None]:
                 text = text[0]
-                logprob = logprob[0]
+                alignment = alignment[0]
+            vad_start = round(vad_segments[idx]['start'], 3)
+            vad_end = round(vad_segments[idx]['end'], 3)
+            active_duration = 0
+            for word in alignment:
+                word["start"] += vad_start 
+                word["end"] += vad_start
+                word_duration = word["end"] - word["start"]
+                if word_duration < 2:
+                    active_duration += word_duration 
             segments.append(
                 {
                     "text": text,
-                    "start": round(vad_segments[idx]['start'], 3),
-                    "end": round(vad_segments[idx]['end'], 3),
-                    "score": logprob,
+                    "start": vad_start, 
+                    "end": vad_end, 
+                    "active_duration": round(active_duration, 3), 
+                    "alignment": alignment,
+                    "feature": vad_segments[idx]["feature"]
                 }
             )
 
@@ -407,17 +432,24 @@ class FasterWhisperPipeline(Pipeline):
 
         return {"segments": segments, "language": language}
 
-    def detect_language(self, audio: np.ndarray):
+    def detect_language(self, audio: np.ndarray, seg):
         # if audio.shape[0] < N_SAMPLES:
         #    print("Warning: audio is shorter than 30s, language detection may be inaccurate.")
-        segment = log_mel_spectrogram(audio[: N_SAMPLES],
+        feature = log_mel_spectrogram(audio[: N_SAMPLES],
                                       padding=0 if audio.shape[0] >= N_SAMPLES else N_SAMPLES - audio.shape[0])
-        encoder_output = self.i18n_model.encode(segment)
+        encoder_output = self.i18n_model.encode(feature)
+        if seg:
+            seg["feature"] = feature
         results = self.i18n_model.model.detect_language(encoder_output)
         language_token, _ = results[0][0]
         first_language = language_token[2:-2]
         second_language_token, second_language_probability = results[0][1]
         second_language = second_language_token[2:-2]
+        if second_language_probability > 0.05:
+            seg["language"] = [first_language, second_language]
+        else:
+            seg["language"] = [first_language]
+        return seg["language"]
         # In bilingual setting, prefers non-English output.
         if first_language == "en" and second_language_probability > 0.4:
             return second_language
