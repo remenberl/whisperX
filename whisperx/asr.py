@@ -435,7 +435,7 @@ class FasterWhisperPipeline(Pipeline):
     def detect_language(self, audio: np.ndarray, seg):
         # if audio.shape[0] < N_SAMPLES:
         #    print("Warning: audio is shorter than 30s, language detection may be inaccurate.")
-        feature = log_mel_spectrogram(audio[: N_SAMPLES],
+        feature = log_mel_spectrogram(audio[: N_SAMPLES], n_mels=80,
                                       padding=0 if audio.shape[0] >= N_SAMPLES else N_SAMPLES - audio.shape[0])
         encoder_output = self.i18n_model.encode(feature)
         if seg:

@@ -1,4 +1,4 @@
-torch>=2
+torch==2.0.1
 torchaudio>=2
 faster-whisper>=0.8
 transformers

@@ -90,7 +90,7 @@ def mel_filters(device, n_mels: int = N_MELS) -> torch.Tensor:
             mel_80=librosa.filters.mel(sr=16000, n_fft=400, n_mels=80),
         )
     """
-    assert n_mels == 80, f"Unsupported n_mels: {n_mels}"
+    assert n_mels == 80 or n_mels == 128, f"Unsupported n_mels: {n_mels}"
     with np.load(
         os.path.join(os.path.dirname(__file__), "assets", "mel_filters.npz")
     ) as f:
