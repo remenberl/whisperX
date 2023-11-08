@@ -237,13 +237,12 @@ def merge_vad(vad_arr, pad_onset=0.0, pad_offset=0.0, min_duration_off=0.0, min_
     return active_segs
 
 
-def merge_intervals(intervals, weights, chunk_size, onpad=0.2):
+def merge_intervals(intervals, weights, chunk_size):
     if len(intervals) == 0:
         print("No active speech found in audio")
         return []
     sorted_weights = sorted(enumerate(weights[:-1]), key = lambda i:i[-1], reverse = True)
     for i, interval in enumerate(intervals):
-        interval[0] = max(0, interval[0]-onpad)
         interval.append((i, i))
     # Greedily merge intervals with the highest weights.
     for index, _ in sorted_weights:
@@ -270,7 +269,7 @@ def merge_intervals(intervals, weights, chunk_size, onpad=0.2):
                                     })
             next = interval[-1][1]
             continue
-        merged_segments[-1]["end"] = interval[1]
+        merged_segments[-1]["end"] = max(merged_segments[-1]["end"], interval[1])
         merged_segments[-1]["segments"].append(interval[:2])
         merged_segments[-1]["weights"].append(weights[i])
     return merged_segments

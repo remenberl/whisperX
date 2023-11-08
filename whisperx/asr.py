@@ -274,7 +274,7 @@ class FasterWhisperPipeline(Pipeline):
             model_iterator, self.postprocess, postprocess_params)
         return final_iterator
 
-    def detect_segment_language(self, audio: np.ndarray, seg):
+    def detect_segment_language(self, audio: np.ndarray, seg, min_duration=2):
         f1 = int(seg['start'] * SAMPLE_RATE)
         f2 = int(seg['end'] * SAMPLE_RATE)
         languages = self.detect_language(audio[f1:f2], seg)
@@ -294,13 +294,26 @@ class FasterWhisperPipeline(Pipeline):
                     f1 = int(subseg["start"] * SAMPLE_RATE)
                     f2 = int(subseg["end"] * SAMPLE_RATE)
                     languages = self.detect_language(audio[f1:f2], subseg)
-                    if len(languages) == 1 or subseg["end"] - subseg["start"] < 4:
+                    if len(languages) == 1 or subseg["end"] - subseg["start"] < min_duration:
                         segs_to_return.append(subseg)
                     else:
                         new_segs_to_split.append(subseg)
             segs_to_split = new_segs_to_split
         segs_to_return.sort(key=lambda seg: seg["start"])
-        return segs_to_return
+        merged_segments = []
+        prev_lang = ""
+        for seg in segs_to_return:
+            if seg["language"] != prev_lang:
+                merged_segments.append(seg)
+            else:
+                merged_segments[-1]["end"] = max(merged_segments[-1]["end"], seg["end"])
+                del merged_segments[-1]["feature"]
+        for seg in merged_segments:
+            if "feature" not in seg:
+                f1 = int(seg["start"] * SAMPLE_RATE)
+                f2 = int(seg["end"] * SAMPLE_RATE)
+                self.detect_language(audio["f1:f2"], seg)
+        return merged_segments 
 
 
     def transcribe(
