@@ -118,6 +118,7 @@ def load_model(i18n_whisper_arch,
         tokenizer=tokenizer,
         suppress_numerals=suppress_numerals,
         vad_params=default_vad_options,
+        device="cuda:0"
     )
 
 
@@ -127,8 +128,8 @@ class WhisperModel(faster_whisper.WhisperModel):
     Currently only works in non-timestamp mode and fixed prompt for all samples in batch.
     '''
 
-    def generate_segment_batched(self, features: np.ndarray, tokenizer: faster_whisper.tokenizer.Tokenizer, options: faster_whisper.transcribe.TranscriptionOptions):
-        batch_size = features.shape[0]
+    def generate_segment_batched(self, encodings, tokenizer: faster_whisper.tokenizer.Tokenizer, options: faster_whisper.transcribe.TranscriptionOptions):
+        batch_size = encodings.shape[0]
         all_tokens = []
         prompt_reset_since = 0
         if options.initial_prompt is not None:
@@ -143,12 +144,11 @@ class WhisperModel(faster_whisper.WhisperModel):
             prefix=options.prefix,
         )
 
-        encoder_output = self.encode(features)
 
         max_initial_timestamp_index = int(
             round(options.max_initial_timestamp / self.time_precision)
         )
-
+        encoder_output = ctranslate2.StorageView.from_array(encodings)
         result = self.model.generate(
             encoder_output,
             [prompt] * batch_size,
@@ -265,7 +265,8 @@ class FasterWhisperPipeline(Pipeline):
         # TODO hack by collating feature_extractor and image_processor
 
         def stack(items):
-            return {'inputs': torch.stack([x['inputs'] for x in items])}
+            stacked_encodings = torch.cat([x['inputs'] for x in items], 0)
+            return {'inputs': stacked_encodings} 
         dataloader = torch.utils.data.DataLoader(
             dataset, num_workers=num_workers, batch_size=batch_size, collate_fn=stack)
         model_iterator = PipelineIterator(
@@ -307,12 +308,11 @@ class FasterWhisperPipeline(Pipeline):
                 merged_segments.append(seg)
             else:
                 merged_segments[-1]["end"] = max(merged_segments[-1]["end"], seg["end"])
-                del merged_segments[-1]["feature"]
         for seg in merged_segments:
-            if "feature" not in seg:
-                f1 = int(seg["start"] * SAMPLE_RATE)
-                f2 = int(seg["end"] * SAMPLE_RATE)
-                self.detect_language(audio["f1:f2"], seg)
+            del seg["encoding"]
+            f1 = int(seg["start"] * SAMPLE_RATE)
+            f2 = int(seg["end"] * SAMPLE_RATE)
+            self.cache_encoding(audio[f1:f2], seg)
         return merged_segments 
 
 
@@ -374,7 +374,7 @@ class FasterWhisperPipeline(Pipeline):
     ) -> TranscriptionResult:
         def data(segments):
             for seg in segments:
-                yield {'inputs': seg["feature"]}
+                yield {'inputs': seg["encoding"]}
 
         if self.tokenizer is None:
             language = language or self.detect_language(audio)[0]
@@ -430,7 +430,7 @@ class FasterWhisperPipeline(Pipeline):
                     "end": vad_end, 
                     "active_duration": round(active_duration, 3), 
                     "alignment": alignment,
-                    "feature": vad_segments[idx]["feature"]
+                    "encoding": vad_segments[idx]["encoding"]
                 }
             )
 
@@ -445,24 +445,34 @@ class FasterWhisperPipeline(Pipeline):
 
         return {"segments": segments, "language": language}
 
+    def cache_encoding(self, audio: np.ndarray, seg):
+        feature = log_mel_spectrogram(audio[: N_SAMPLES], n_mels=80,
+                                      padding=0 if audio.shape[0] >= N_SAMPLES else N_SAMPLES - audio.shape[0])
+        if seg["language"][0] == "en":
+            encoder_output = self.en_model.encode(feature)
+        else:
+            encoder_output = self.i18n_model.encode(feature)
+        seg["encoding"] = torch.as_tensor(encoder_output, device="cuda")
+
     def detect_language(self, audio: np.ndarray, seg):
-        # if audio.shape[0] < N_SAMPLES:
-        #    print("Warning: audio is shorter than 30s, language detection may be inaccurate.")
         feature = log_mel_spectrogram(audio[: N_SAMPLES], n_mels=80,
                                       padding=0 if audio.shape[0] >= N_SAMPLES else N_SAMPLES - audio.shape[0])
         encoder_output = self.i18n_model.encode(feature)
-        if seg:
-            seg["feature"] = feature
         results = self.i18n_model.model.detect_language(encoder_output)
         language_token, _ = results[0][0]
         first_language = language_token[2:-2]
         second_language_token, second_language_probability = results[0][1]
         second_language = second_language_token[2:-2]
         if second_language_probability > 0.05:
-            seg["language"] = [first_language, second_language]
+            detected_languages = [first_language, second_language]
         else:
-            seg["language"] = [first_language]
-        return seg["language"]
+            detected_languages = [first_language]
+        if seg:
+            seg["language"] = detected_languages
+            if seg["language"][0] == "en":
+                encoder_output = self.en_model.encode(feature)
+            seg["encoding"] = torch.as_tensor(encoder_output, device="cuda")
+        return detected_languages 
         # In bilingual setting, prefers non-English output.
         if first_language == "en" and second_language_probability > 0.4:
             return second_language

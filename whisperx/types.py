@@ -30,7 +30,7 @@ class SingleSegment(TypedDict):
     text: str
     alignment: Any
     active_duration: float
-    feature: Any 
+    encoding: Any 
 
 
 class SingleAlignedSegment(TypedDict):
