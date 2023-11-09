@@ -5,6 +5,7 @@ from typing import Callable, List, Union, Optional, NamedTuple
 import ctranslate2
 import faster_whisper
 import numpy as np
+from opencc import OpenCC
 import torch
 from tqdm.contrib import concurrent as tqdm_concurrent
 from transformers import Pipeline
@@ -128,7 +129,10 @@ class WhisperModel(faster_whisper.WhisperModel):
     Currently only works in non-timestamp mode and fixed prompt for all samples in batch.
     '''
 
-    def generate_segment_batched(self, encodings, tokenizer: faster_whisper.tokenizer.Tokenizer, options: faster_whisper.transcribe.TranscriptionOptions):
+    def generate_segment_batched(self, encodings,
+                                 tokenizer: faster_whisper.tokenizer.Tokenizer,
+                                 options: faster_whisper.transcribe.TranscriptionOptions,
+                                 **forward_params: dict):
         batch_size = encodings.shape[0]
         all_tokens = []
         prompt_reset_since = 0
@@ -173,6 +177,15 @@ class WhisperModel(faster_whisper.WhisperModel):
             return tokenizer.tokenizer.decode_batch(res)
 
         text = decode_batch(tokens_batch)
+        lang = forward_params["language"]
+        if lang.startswith("zh"):
+            if lang == "zh-cn":
+                converter = forward_params["t2s"]
+            else:
+                converter = forward_params["s2t"]
+            for i, t in enumerate(text):
+                text[i] = converter.convert(t)
+            tokens_batch = [encoding.ids for encoding in tokenizer.tokenizer.encode_batch(text)] 
         alignments = find_alignments(self.model, tokenizer, tokens_batch, encoder_output)
         return text, alignments
 
@@ -219,8 +232,6 @@ class FasterWhisperPipeline(Pipeline):
         self.suppress_numerals = suppress_numerals
         self._batch_size = kwargs.pop("batch_size", None)
         self._num_workers = 1
-        self._preprocess_params, self._forward_params, self._postprocess_params = self._sanitize_parameters(
-            **kwargs)
         self.call_count = 0
         self.framework = framework
         if self.framework == "pt":
@@ -238,19 +249,28 @@ class FasterWhisperPipeline(Pipeline):
         super(Pipeline, self).__init__()
         self.vad_model = vad
         self._vad_params = vad_params
+        self.t2s = OpenCC('t2s')
+        self.s2t = OpenCC('s2t')
 
     def _sanitize_parameters(self, **kwargs):
         preprocess_kwargs = {}
         if "tokenizer" in kwargs:
             preprocess_kwargs["maybe_arg"] = kwargs["maybe_arg"]
-        return preprocess_kwargs, {}, {}
+        forward_kwargs = {}
+        if "language" in kwargs:
+            forward_kwargs["language"] = kwargs["language"]
+        if "t2s" in kwargs:
+            forward_kwargs["t2s"] = kwargs["t2s"]
+        if "s2t" in kwargs:
+            forward_kwargs["s2t"] = kwargs["s2t"]
+        return preprocess_kwargs, forward_kwargs, {}
 
     def preprocess(self, inputs):
         return {'inputs': inputs['inputs']}
 
-    def _forward(self, model_inputs):
+    def _forward(self, model_inputs, **forward_parameters: dict):
         outputs = self.model.generate_segment_batched(
-            model_inputs['inputs'], self.tokenizer, self.options)
+            model_inputs['inputs'], self.tokenizer, self.options, **forward_parameters)
         return {'text': outputs[0], 'alignment': outputs[1]}
 
     def postprocess(self, model_outputs):
@@ -320,7 +340,8 @@ class FasterWhisperPipeline(Pipeline):
         self, audio: Union[str, np.ndarray], batch_size=None, num_threads=16,
         num_workers=0, language=None, task=None, chunk_size=30,
         print_progress=False, combined_progress=False,
-        get_prompt_per_lang: Optional[Callable[[str], str]] = None
+        get_prompt_per_lang: Optional[Callable[[str], str]] = None,
+        lang_reference="en",
     ) -> list[TranscriptionResult]:
         if isinstance(audio, str):
             audio = load_audio(audio)
@@ -353,6 +374,8 @@ class FasterWhisperPipeline(Pipeline):
         results = []
         for lang, vad_segments in vad_segments_per_lang.items():
             logging.info(f"\tGetting prompts for {lang}")
+            if lang == "zh" and lang_reference.startswith(lang):
+                lang = lang_reference
             if get_prompt_per_lang:
                 prompt = get_prompt_per_lang(lang)
                 logging.info(f"\tPrompt: {prompt}")
@@ -363,34 +386,34 @@ class FasterWhisperPipeline(Pipeline):
                 self.options = new_options
             logging.info(f"\tTranscribing for {lang}")
             results.append(
-                self.transcribe_per_lang(audio, vad_segments, batch_size,
+                self.transcribe_per_lang(vad_segments, batch_size,
                                          num_workers, lang, task,
-                                         chunk_size, print_progress,
-                                         combined_progress))
+                                         print_progress, combined_progress))
         return results
 
     def transcribe_per_lang(
-        self, audio: np.ndarray, vad_segments, batch_size=None, num_workers=0, language=None, task=None, chunk_size=30, print_progress=False, combined_progress=False
+        self, vad_segments, batch_size=None,
+        num_workers=0, language='en', task=None, print_progress=False,
+        combined_progress=False,
     ) -> TranscriptionResult:
         def data(segments):
             for seg in segments:
                 yield {'inputs': seg["encoding"]}
 
+        tokenizer_lang = "zh" if language.startswith("zh") else language
         if self.tokenizer is None:
-            language = language or self.detect_language(audio)[0]
             task = task or "transcribe"
             self.model = self.en_model if language == "en" else self.i18n_model
             self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
                                                                 self.model.model.is_multilingual, task=task,
-                                                                language=language)
+                                                                language=tokenizer_lang)
         else:
-            language = language or self.tokenizer.language_code
             task = task or self.tokenizer.task
-            if task != self.tokenizer.task or language != self.tokenizer.language_code:
+            if task != self.tokenizer.task or tokenizer_lang != self.tokenizer.language_code:
                 self.model = self.en_model if language == "en" else self.i18n_model
                 self.tokenizer = faster_whisper.tokenizer.Tokenizer(self.model.hf_tokenizer,
                                                                     self.model.model.is_multilingual, task=task,
-                                                                    language=language)
+                                                                    language=tokenizer_lang)
 
         if self.suppress_numerals:
             previous_suppress_tokens = self.options.suppress_tokens
@@ -404,7 +427,10 @@ class FasterWhisperPipeline(Pipeline):
         segments: List[SingleSegment] = []
         batch_size = batch_size or self._batch_size
         total_segments = len(vad_segments)
-        for idx, out in enumerate(self.__call__(data(vad_segments), batch_size=batch_size, num_workers=num_workers)):
+        self._preprocess_params, self._forward_params, self._postprocess_params = self._sanitize_parameters(
+            language=language, t2s=self.t2s, s2t=self.s2t)
+        for idx, out in enumerate(self.__call__(data(vad_segments), batch_size=batch_size,
+                                                num_workers=num_workers)):
             if print_progress:
                 base_progress = ((idx + 1) / total_segments) * 100
                 percent_complete = base_progress / 2 if combined_progress else base_progress
@@ -443,7 +469,7 @@ class FasterWhisperPipeline(Pipeline):
             self.options = self.options._replace(
                 suppress_tokens=previous_suppress_tokens)
 
-        return {"segments": segments, "language": language}
+        return {"segments": segments, "language": tokenizer_lang}
 
     def cache_encoding(self, audio: np.ndarray, seg):
         feature = log_mel_spectrogram(audio[: N_SAMPLES], n_mels=80,
@@ -469,7 +495,7 @@ class FasterWhisperPipeline(Pipeline):
             detected_languages = [first_language]
         if seg:
             seg["language"] = detected_languages
-            if seg["language"][0] == "en":
+            if first_language == "en":
                 encoder_output = self.en_model.encode(feature)
             seg["encoding"] = torch.as_tensor(encoder_output, device="cuda")
         return detected_languages 
