@@ -31,7 +31,9 @@ class SingleSegment(TypedDict):
     alignment: Any
     active_duration: float
     encoding: Any 
-
+    segments: Any
+    weights: Any
+    reason: str
 
 class SingleAlignedSegment(TypedDict):
     """

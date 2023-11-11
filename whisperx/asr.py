@@ -160,15 +160,25 @@ class WhisperModel(faster_whisper.WhisperModel):
             repetition_penalty=options.repetition_penalty,
             no_repeat_ngram_size=options.no_repeat_ngram_size,
             max_length=self.max_length,
+            return_scores=True,
             return_no_speech_prob=True,
             suppress_blank=options.suppress_blank,
             suppress_tokens=options.suppress_tokens,
             max_initial_timestamp_index=max_initial_timestamp_index,
+            #sampling_temperature=0.1,
             #beam_size=options.beam_size,
         )
 
         tokens_batch = [x.sequences_ids[0] for x in result]
-
+       
+        avg_logprobs = []
+        no_speech_probs = []
+        for i, tokens in enumerate(tokens_batch):
+            seq_len = len(tokens)
+            cum_logprob = result[i].scores[0] * seq_len
+            avg_logprob = cum_logprob / (seq_len + 1)
+            avg_logprobs.append(avg_logprob)
+            no_speech_probs.append(result[i].no_speech_prob)
         def decode_batch(tokens: List[List[int]]) -> List[str]:
             res = []
             for tk in tokens:
@@ -187,7 +197,7 @@ class WhisperModel(faster_whisper.WhisperModel):
                 text[i] = converter.convert(t)
             tokens_batch = [encoding.ids for encoding in tokenizer.tokenizer.encode_batch(text)] 
         alignments = find_alignments(self.model, tokenizer, tokens_batch, encoder_output)
-        return text, alignments
+        return text, alignments, avg_logprobs, no_speech_probs
 
     def encode(self, features: np.ndarray) -> ctranslate2.StorageView:
         # When the model is running on multiple GPUs, the encoder output should be moved
@@ -271,7 +281,7 @@ class FasterWhisperPipeline(Pipeline):
     def _forward(self, model_inputs, **forward_parameters: dict):
         outputs = self.model.generate_segment_batched(
             model_inputs['inputs'], self.tokenizer, self.options, **forward_parameters)
-        return {'text': outputs[0], 'alignment': outputs[1]}
+        return {'text': outputs[0], 'alignment': outputs[1], 'logprob': outputs[2], 'no_speech_prob': outputs[3]}
 
     def postprocess(self, model_outputs):
         return model_outputs
@@ -295,7 +305,7 @@ class FasterWhisperPipeline(Pipeline):
             model_iterator, self.postprocess, postprocess_params)
         return final_iterator
 
-    def detect_segment_language(self, audio: np.ndarray, seg, min_duration=2):
+    def detect_segment_language(self, audio: np.ndarray, seg, min_drop_duration=0.1):
         f1 = int(seg['start'] * SAMPLE_RATE)
         f2 = int(seg['end'] * SAMPLE_RATE)
         languages = self.detect_language(audio[f1:f2], seg)
@@ -307,7 +317,9 @@ class FasterWhisperPipeline(Pipeline):
             new_segs_to_split = []
             for seg in segs_to_split:
                 chunk_size = (seg["end"] - seg["start"]) / 2
-                subsegments = merge_intervals(seg["segments"], seg["weights"], chunk_size=chunk_size)
+                subsegments = merge_intervals(seg["segments"], seg["weights"],
+                                              chunk_size=chunk_size,
+                                              min_drop_duration=min_drop_duration)
                 if len(subsegments) == 1:
                     segs_to_return.append(seg)
                     continue
@@ -315,7 +327,7 @@ class FasterWhisperPipeline(Pipeline):
                     f1 = int(subseg["start"] * SAMPLE_RATE)
                     f2 = int(subseg["end"] * SAMPLE_RATE)
                     languages = self.detect_language(audio[f1:f2], subseg)
-                    if len(languages) == 1 or subseg["end"] - subseg["start"] < min_duration:
+                    if len(languages) == 1 or subseg["end"]-subseg["start"] <= 2:
                         segs_to_return.append(subseg)
                     else:
                         new_segs_to_split.append(subseg)
@@ -342,7 +354,7 @@ class FasterWhisperPipeline(Pipeline):
         print_progress=False, combined_progress=False,
         get_prompt_per_lang: Optional[Callable[[str], str]] = None,
         lang_reference="en",
-    ) -> list[TranscriptionResult]:
+    ) -> list:
         if isinstance(audio, str):
             audio = load_audio(audio)
 
@@ -351,6 +363,7 @@ class FasterWhisperPipeline(Pipeline):
         vad_segments = merge_chunks(
             vad_segments,
             chunk_size,
+            min_drop_duration=0.1,
             onset=self._vad_params["vad_onset"],
             offset=self._vad_params["vad_offset"],
         )
@@ -391,11 +404,35 @@ class FasterWhisperPipeline(Pipeline):
                                          print_progress, combined_progress))
         return results
 
+    def transcribe_per_lang_with_split(
+        self, audio, vad_segments, batch_size=None,
+        num_workers=0, language='en', task=None, print_progress=False,
+        combined_progress=False, min_drop_duration=0.1
+    ):
+        split_segments = []
+        to_orig_map = {}
+        for i, seg in enumerate(vad_segments):
+            chunk_size = (seg["end"] - seg["start"]) / 2
+            subsegments = merge_intervals(seg["segments"], seg["weights"], chunk_size, min_drop_duration)
+            for subsegment in subsegments:
+                f1 = int(subsegment["start"] * SAMPLE_RATE)
+                f2 = int(subsegment["end"] * SAMPLE_RATE)
+                self.cache_encoding(audio[f1:f2], subsegment, language)
+                to_orig_map[len(split_segments)] = i
+                split_segments.append(subsegment)
+        results = self.transcribe_per_lang(split_segments, batch_size,
+                                           num_workers, language, task,
+                                           print_progress, combined_progress)
+        output_segments = [[] for _ in range(len(vad_segments))]
+        for i, seg in enumerate(results["segments"]):
+            output_segments[to_orig_map[i]].append(seg)
+        return {"segments": output_segments, "language": results["language"]}
+
     def transcribe_per_lang(
         self, vad_segments, batch_size=None,
         num_workers=0, language='en', task=None, print_progress=False,
         combined_progress=False,
-    ) -> TranscriptionResult:
+    ):
         def data(segments):
             for seg in segments:
                 yield {'inputs': seg["encoding"]}
@@ -424,7 +461,7 @@ class FasterWhisperPipeline(Pipeline):
             self.options = self.options._replace(
                 suppress_tokens=new_suppressed_tokens)
 
-        segments: List[SingleSegment] = []
+        segments = []
         batch_size = batch_size or self._batch_size
         total_segments = len(vad_segments)
         self._preprocess_params, self._forward_params, self._postprocess_params = self._sanitize_parameters(
@@ -456,7 +493,11 @@ class FasterWhisperPipeline(Pipeline):
                     "end": vad_end, 
                     "active_duration": round(active_duration, 3), 
                     "alignment": alignment,
-                    "encoding": vad_segments[idx]["encoding"]
+                    "encoding": vad_segments[idx]["encoding"],
+                    "segments": vad_segments[idx]["segments"],
+                    "weights": vad_segments[idx]["weights"],
+                    "logprob": out["logprob"],
+                    "no_speech_prob": out["no_speech_prob"],
                 }
             )
 
@@ -471,10 +512,11 @@ class FasterWhisperPipeline(Pipeline):
 
         return {"segments": segments, "language": tokenizer_lang}
 
-    def cache_encoding(self, audio: np.ndarray, seg):
+    def cache_encoding(self, audio: np.ndarray, seg, language=None):
         feature = log_mel_spectrogram(audio[: N_SAMPLES], n_mels=80,
                                       padding=0 if audio.shape[0] >= N_SAMPLES else N_SAMPLES - audio.shape[0])
-        if seg["language"][0] == "en":
+        lang = language if language else seg["language"][0]
+        if lang == "en":
             encoder_output = self.en_model.encode(feature)
         else:
             encoder_output = self.i18n_model.encode(feature)

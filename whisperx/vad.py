@@ -237,7 +237,7 @@ def merge_vad(vad_arr, pad_onset=0.0, pad_offset=0.0, min_duration_off=0.0, min_
     return active_segs
 
 
-def merge_intervals(intervals, weights, chunk_size):
+def merge_intervals(intervals, weights, chunk_size, min_drop_duration):
     if len(intervals) == 0:
         print("No active speech found in audio")
         return []
@@ -272,12 +272,14 @@ def merge_intervals(intervals, weights, chunk_size):
         merged_segments[-1]["end"] = max(merged_segments[-1]["end"], interval[1])
         merged_segments[-1]["segments"].append(interval[:2])
         merged_segments[-1]["weights"].append(weights[i])
+    merged_segments = [seg for seg in merged_segments if seg["end"] - seg["start"] >= min_drop_duration]
     return merged_segments
 
 
 def merge_chunks(
     segments,
     chunk_size,
+    min_drop_duration,
     onset: float = 0.5,
     offset: Optional[float] = None,
 ):
@@ -288,4 +290,4 @@ def merge_chunks(
     assert chunk_size > 0
     binarize = Binarize(max_duration=6, onset=onset, offset=offset)
     intervals, weights = binarize(segments)
-    return merge_intervals(intervals, weights, chunk_size)
+    return merge_intervals(intervals, weights, chunk_size, min_drop_duration=min_drop_duration)
