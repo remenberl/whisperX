@@ -189,7 +189,7 @@ class WhisperModel(faster_whisper.WhisperModel):
         text = decode_batch(tokens_batch)
         lang = forward_params["language"]
         if lang.startswith("zh"):
-            if lang == "zh-cn":
+            if lang == "zh" or lang == "zh_Hans":
                 converter = forward_params["t2s"]
             else:
                 converter = forward_params["s2t"]
