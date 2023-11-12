@@ -165,8 +165,8 @@ class WhisperModel(faster_whisper.WhisperModel):
             suppress_blank=options.suppress_blank,
             suppress_tokens=options.suppress_tokens,
             max_initial_timestamp_index=max_initial_timestamp_index,
-            #sampling_temperature=0.1,
-            #beam_size=options.beam_size,
+            sampling_temperature=0.1,
+            beam_size=options.beam_size,
         )
 
         tokens_batch = [x.sequences_ids[0] for x in result]
