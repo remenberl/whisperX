@@ -67,8 +67,8 @@ def load_model(i18n_whisper_arch,
     tokenizer = None
 
     default_asr_options = {
-        "beam_size": 5,
-        "best_of": 5,
+        "beam_size": 3,
+        "best_of": 3,
         "patience": 1,
         "length_penalty": 1,
         "repetition_penalty": 1,
