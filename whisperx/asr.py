@@ -481,11 +481,18 @@ class FasterWhisperPipeline(Pipeline):
             vad_end = round(vad_segments[idx]['end'], 3)
             active_duration = 0
             for word in alignment:
-                word["start"] += vad_start 
+                word["start"] += vad_start
+                word["start"] = round(word["start"], 3)
                 word["end"] += vad_start
+                word["end"] = round(word["end"], 3)
+                del word["probability"]
+                del word["tokens"]
+                if word["start"] < vad_start: 
+                    continue
+                if word["end"] > vad_end: 
+                    continue
                 word_duration = word["end"] - word["start"]
-                if word_duration < 2:
-                    active_duration += word_duration 
+                active_duration += word_duration 
             segments.append(
                 {
                     "text": text,
@@ -496,8 +503,8 @@ class FasterWhisperPipeline(Pipeline):
                     "encoding": vad_segments[idx]["encoding"],
                     "segments": vad_segments[idx]["segments"],
                     "weights": vad_segments[idx]["weights"],
-                    "logprob": out["logprob"],
-                    "no_speech_prob": out["no_speech_prob"],
+                    "logprob": round(out["logprob"], 3),
+                    "no_speech_prob": round(out["no_speech_prob"], 3),
                 }
             )
 

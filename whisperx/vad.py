@@ -237,7 +237,7 @@ def merge_vad(vad_arr, pad_onset=0.0, pad_offset=0.0, min_duration_off=0.0, min_
     return active_segs
 
 
-def merge_intervals(intervals, weights, chunk_size, min_drop_duration):
+def merge_intervals(intervals, weights, chunk_size, min_drop_duration, pad=0.0):
     if len(intervals) == 0:
         print("No active speech found in audio")
         return []
@@ -262,7 +262,7 @@ def merge_intervals(intervals, weights, chunk_size, min_drop_duration):
     next = -1 
     for i, interval in enumerate(intervals):
         if i > next:
-            merged_segments.append({"start": interval[0],
+            merged_segments.append({"start": interval[0]-pad,
                                     "end": interval[1],
                                     "segments": [interval[:2]],
                                     "weights": [weights[i]],

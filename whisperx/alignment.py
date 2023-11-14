@@ -534,7 +534,31 @@ def find_alignments(model, tokenizer, text_tokens, encoder_output, median_filter
             for word, tokens, start, end, probability in zip(
                 words, word_tokens, start_times, end_times, word_probabilities
             )
+            if word != ""
         ]
+        word_durations = np.array([word["end"] - word["start"] for word in alignment])
+        word_durations = word_durations[word_durations.nonzero()]
+        median_duration = np.median(word_durations) if len(word_durations) > 0 else 0.0
+        max_duration = median_duration * 2
+        # ensure the first and second word after a pause is not longer than
+        # twice the median word duration.
+        if len(alignment) > 0:
+            if alignment[0]["end"] > median_duration * 4 and (
+                    alignment[0]["end"] - alignment[0]["start"] > max_duration
+                    or (
+                        len(alignment) > 1
+                        and alignment[1]["end"] - alignment[0]["start"] > max_duration * 2
+                    )
+                ):
+                    if (
+                        len(alignment) > 1
+                        and alignment[1]["end"] - alignment[1]["start"] > max_duration
+                    ):
+                        boundary = max(
+                            alignment[1]["end"] / 2, alignment[1]["end"] - max_duration
+                        )
+                        alignment[0]["end"] = alignment[1]["start"] = boundary
+                    alignment[0]["start"] = max(0, alignment[0]["end"] - max_duration)
         merge_punctuations(alignment, prepended="\"'“¿([{-", appended="\"'.。,，!！?？:：”)]}、")
         final_alignments.append(alignment)
     return final_alignments
