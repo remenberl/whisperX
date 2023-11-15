@@ -399,7 +399,7 @@ class FasterWhisperPipeline(Pipeline):
                 self.options = new_options
             logging.info(f"\tTranscribing for {lang}")
             results.append(
-                self.transcribe_per_lang(vad_segments, batch_size,
+                self.transcribe_per_lang(audio, vad_segments, batch_size,
                                          num_workers, lang, task,
                                          print_progress, combined_progress))
         return results
@@ -420,7 +420,7 @@ class FasterWhisperPipeline(Pipeline):
                 self.cache_encoding(audio[f1:f2], subsegment, language)
                 to_orig_map[len(split_segments)] = i
                 split_segments.append(subsegment)
-        results = self.transcribe_per_lang(split_segments, batch_size,
+        results = self.transcribe_per_lang(audio, split_segments, batch_size,
                                            num_workers, language, task,
                                            print_progress, combined_progress)
         output_segments = [[] for _ in range(len(vad_segments))]
@@ -429,12 +429,18 @@ class FasterWhisperPipeline(Pipeline):
         return {"segments": output_segments, "language": results["language"]}
 
     def transcribe_per_lang(
-        self, vad_segments, batch_size=None,
+        self, audio, vad_segments, batch_size=None,
         num_workers=0, language='en', task=None, print_progress=False,
-        combined_progress=False,
+        combined_progress=False
     ):
         def data(segments):
             for seg in segments:
+                # For language mismatch, regenerates encoding.
+                if seg["encoding_lang"] != language and (
+                        language == "en" or seg["encoding_lang"] == "en"):
+                    f1 = int(seg["start"] * SAMPLE_RATE)
+                    f2 = int(seg["end"] * SAMPLE_RATE)
+                    self.cache_encoding(audio[f1:f2], seg, language)
                 yield {'inputs': seg["encoding"]}
 
         tokenizer_lang = "zh" if language.startswith("zh") else language
@@ -501,6 +507,7 @@ class FasterWhisperPipeline(Pipeline):
                     "active_duration": round(active_duration, 3), 
                     "alignment": alignment,
                     "encoding": vad_segments[idx]["encoding"],
+                    "encoding_lang": vad_segments[idx]["encoding_lang"],
                     "segments": vad_segments[idx]["segments"],
                     "weights": vad_segments[idx]["weights"],
                     "logprob": round(out["logprob"], 3),
@@ -528,6 +535,7 @@ class FasterWhisperPipeline(Pipeline):
         else:
             encoder_output = self.i18n_model.encode(feature)
         seg["encoding"] = torch.as_tensor(encoder_output, device="cuda")
+        seg["encoding_lang"] = lang 
 
     def detect_language(self, audio: np.ndarray, seg):
         feature = log_mel_spectrogram(audio[: N_SAMPLES], n_mels=80,
@@ -547,6 +555,7 @@ class FasterWhisperPipeline(Pipeline):
             if first_language == "en":
                 encoder_output = self.en_model.encode(feature)
             seg["encoding"] = torch.as_tensor(encoder_output, device="cuda")
+            seg["encoding_lang"] = first_language 
         return detected_languages 
         # In bilingual setting, prefers non-English output.
         if first_language == "en" and second_language_probability > 0.4:
