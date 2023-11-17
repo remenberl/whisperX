@@ -11,7 +11,7 @@ from .utils import exact_div
 
 # hard-coded audio hyperparameters
 SAMPLE_RATE = 16000
-PADDED_LEFT_SECOND = 0.1
+PADDED_LEFT_SECOND = 0.2
 N_FFT = 400
 N_MELS = 80
 HOP_LENGTH = 160
