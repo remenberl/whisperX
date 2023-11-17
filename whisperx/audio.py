@@ -11,6 +11,7 @@ from .utils import exact_div
 
 # hard-coded audio hyperparameters
 SAMPLE_RATE = 16000
+PADDED_LEFT_SECOND = 0.1
 N_FFT = 400
 N_MELS = 80
 HOP_LENGTH = 160
@@ -133,7 +134,8 @@ def log_mel_spectrogram(
     if device is not None:
         audio = audio.to(device)
     if padding > 0:
-        audio = F.pad(audio, (0, padding))
+        padded_left = int(PADDED_LEFT_SECOND * SAMPLE_RATE)
+        audio = F.pad(audio, (padded_left, padding-padded_left))
     window = torch.hann_window(N_FFT).to(audio.device)
     stft = torch.stft(audio, N_FFT, HOP_LENGTH, window=window, return_complex=True)
     magnitudes = stft[..., :-1].abs() ** 2

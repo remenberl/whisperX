@@ -11,7 +11,7 @@ from tqdm.contrib import concurrent as tqdm_concurrent
 from transformers import Pipeline
 from transformers.pipelines.pt_utils import PipelineIterator
 
-from .audio import N_SAMPLES, SAMPLE_RATE, load_audio, log_mel_spectrogram
+from .audio import PADDED_LEFT_SECOND, N_SAMPLES, SAMPLE_RATE, load_audio, log_mel_spectrogram
 from .alignment import find_alignments
 from .vad import load_vad_model, merge_chunks, merge_intervals
 from .types import TranscriptionResult, SingleSegment
@@ -165,8 +165,8 @@ class WhisperModel(faster_whisper.WhisperModel):
             suppress_blank=options.suppress_blank,
             suppress_tokens=options.suppress_tokens,
             max_initial_timestamp_index=max_initial_timestamp_index,
-            sampling_temperature=0.1,
-            beam_size=options.beam_size,
+            #sampling_temperature=0.1,
+            #beam_size=options.beam_size,
         )
 
         tokens_batch = [x.sequences_ids[0] for x in result]
@@ -362,7 +362,7 @@ class FasterWhisperPipeline(Pipeline):
             audio).unsqueeze(0), "sample_rate": SAMPLE_RATE})
         vad_segments = merge_chunks(
             vad_segments,
-            chunk_size,
+            chunk_size - PADDED_LEFT_SECOND,
             min_drop_duration=0.1,
             onset=self._vad_params["vad_onset"],
             offset=self._vad_params["vad_offset"],
@@ -487,9 +487,9 @@ class FasterWhisperPipeline(Pipeline):
             vad_end = round(vad_segments[idx]['end'], 3)
             active_duration = 0
             for word in alignment:
-                word["start"] += vad_start
+                word["start"] += vad_start - PADDED_LEFT_SECOND
                 word["start"] = round(word["start"], 3)
-                word["end"] += vad_start
+                word["end"] += vad_start - PADDED_LEFT_SECOND
                 word["end"] = round(word["end"], 3)
                 del word["probability"]
                 del word["tokens"]

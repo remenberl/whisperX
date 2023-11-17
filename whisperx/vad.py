@@ -1,5 +1,6 @@
 import hashlib
 import logging 
+import math
 import os
 import urllib
 from typing import Callable, Optional, Text, Union
@@ -141,14 +142,14 @@ class Binarize:
                         min_score_div_idx = search_after + np.argmin(curr_scores[search_after:])
                         min_score_t = curr_timestamps[min_score_div_idx]
                         intervals.append([start, min_score_t])
-                        weights.append(y)
+                        weights.append(math.exp(y))
                         start = curr_timestamps[min_score_div_idx]
                         curr_scores = curr_scores[min_score_div_idx+1:]
                         curr_timestamps = curr_timestamps[min_score_div_idx+1:]
                     # switching from active to inactive
                     elif y < self.offset:
                         intervals.append([start, t])
-                        weights.append(y)
+                        weights.append(math.exp(y))
                         start = t
                         is_active = False
                         curr_scores = []
@@ -157,16 +158,18 @@ class Binarize:
                     curr_timestamps.append(t)
                 # currently inactive
                 else:
-                    if weights and y < weights[-1]:
-                        weights[-1] = y
+                    if weights and math.exp(y) < weights[-1]:
+                        weights[-1] = math.exp(y)
                     # switching from inactive to active
                     if y > self.onset:
                         start = t
                         is_active = True
+                        if weights:
+                            weights[-1] /= math.exp(t - intervals[-1][1]) 
             # if active at the end, add final region
             if is_active:
                 intervals.append([start, t])
-                weights.append(y) 
+                weights.append(math.exp(y)) 
         return intervals, weights
 
 
