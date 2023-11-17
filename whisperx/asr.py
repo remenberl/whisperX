@@ -487,9 +487,13 @@ class FasterWhisperPipeline(Pipeline):
             vad_end = round(vad_segments[idx]['end'], 3)
             active_duration = 0
             for word in alignment:
-                word["start"] += vad_start - PADDED_LEFT_SECOND
+                word["start"] -= PADDED_LEFT_SECOND
+                word["start"] = max(0, word["start"])
+                word["start"] += vad_start
+                word["end"] -= PADDED_LEFT_SECOND
+                word["end"] = max(0, word["end"])
+                word["end"] += vad_start
                 word["start"] = round(word["start"], 3)
-                word["end"] += vad_start - PADDED_LEFT_SECOND
                 word["end"] = round(word["end"], 3)
                 del word["probability"]
                 del word["tokens"]
