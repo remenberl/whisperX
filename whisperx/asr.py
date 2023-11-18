@@ -13,9 +13,8 @@ from transformers.pipelines.pt_utils import PipelineIterator
 
 from .audio import PADDED_LEFT_SECOND, N_SAMPLES, SAMPLE_RATE, load_audio, log_mel_spectrogram
 from .alignment import find_alignments
+from .quality import maybe_reject_reason
 from .vad import load_vad_model, merge_chunks, merge_intervals
-from .types import TranscriptionResult, SingleSegment
-
 
 def find_numeral_symbol_tokens(tokenizer):
     numeral_symbol_tokens = []
@@ -502,22 +501,24 @@ class FasterWhisperPipeline(Pipeline):
                 if word["end"] > vad_end: 
                     continue
                 word_duration = word["end"] - word["start"]
-                active_duration += word_duration 
-            segments.append(
-                {
-                    "text": text,
-                    "start": vad_start, 
-                    "end": vad_end, 
-                    "active_duration": round(active_duration, 3), 
-                    "alignment": alignment,
-                    "encoding": vad_segments[idx]["encoding"],
-                    "encoding_lang": vad_segments[idx]["encoding_lang"],
-                    "segments": vad_segments[idx]["segments"],
-                    "weights": vad_segments[idx]["weights"],
-                    "logprob": round(out["logprob"], 3),
-                    "no_speech_prob": round(out["no_speech_prob"], 3),
-                }
-            )
+                active_duration += word_duration
+            seg = {
+                "text": text,
+                "start": vad_start,
+                "end": vad_end,
+                "active_duration": round(active_duration, 3),
+                "alignment": alignment,
+                "segments": vad_segments[idx]["segments"],
+                "weights": vad_segments[idx]["weights"],
+                "logprob": round(out["logprob"], 3),
+                "no_speech_prob": round(out["no_speech_prob"], 3),
+            }
+            seg["reason"] = maybe_reject_reason(seg)
+            # Because seg has problem, encoding is returned for later reprocess.
+            if seg["reason"]:
+                seg["encoding"] = vad_segments[idx]["encoding"]
+                seg["encoding_lang"] = vad_segments[idx]["encoding_lang"]
+            segments.append(seg)
 
         # revert the tokenizer if multilingual inference is enabled
         if self.preset_language is None:
