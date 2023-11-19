@@ -397,10 +397,12 @@ class FasterWhisperPipeline(Pipeline):
                     **new_asr_options)
                 self.options = new_options
             logging.info(f"\tTranscribing for {lang}")
+            cache_encoding_device = "cuda" if cache_encoding else "cpu"
             results.append(
                 self.transcribe_per_lang(audio, vad_segments, batch_size,
                                          num_workers, lang, task,
-                                         print_progress, combined_progress))
+                                         print_progress, combined_progress,
+                                         cache_encoding_device))
         return results
 
     def transcribe_per_lang_with_split(
@@ -430,7 +432,7 @@ class FasterWhisperPipeline(Pipeline):
     def transcribe_per_lang(
         self, audio, vad_segments, batch_size=None,
         num_workers=0, language='en', task=None, print_progress=False,
-        combined_progress=False
+        combined_progress=False, cache_encoding_device="cuda",
     ):
         def data(segments):
             for seg in segments:
@@ -444,7 +446,8 @@ class FasterWhisperPipeline(Pipeline):
                 if generate_cache:
                     f1 = int(seg["start"] * SAMPLE_RATE)
                     f2 = int(seg["end"] * SAMPLE_RATE)
-                    self.cache_encoding(audio[f1:f2], seg, language)
+                    self.cache_encoding(audio[f1:f2], seg, language,
+                                        cache_encoding_device)
                 yield {'inputs': seg["encoding"]}
 
         tokenizer_lang = "zh" if language.startswith("zh") else language
@@ -536,7 +539,7 @@ class FasterWhisperPipeline(Pipeline):
 
         return {"segments": segments, "language": tokenizer_lang}
 
-    def cache_encoding(self, audio: np.ndarray, seg, language=None):
+    def cache_encoding(self, audio: np.ndarray, seg, language=None, device="cuda"):
         feature = log_mel_spectrogram(audio[: N_SAMPLES], n_mels=80,
                                       padding=0 if audio.shape[0] >= N_SAMPLES else N_SAMPLES - audio.shape[0])
         lang = language if language else seg["language"][0]
@@ -544,7 +547,7 @@ class FasterWhisperPipeline(Pipeline):
             encoder_output = self.en_model.encode(feature)
         else:
             encoder_output = self.i18n_model.encode(feature)
-        seg["encoding"] = torch.as_tensor(encoder_output, device="cuda")
+        seg["encoding"] = torch.as_tensor(encoder_output, device=device)
         seg["encoding_lang"] = lang 
 
     def detect_language(self, audio: np.ndarray, seg, cache_encoding):
