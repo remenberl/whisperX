@@ -33,8 +33,6 @@ def load_model(i18n_whisper_arch,
                compute_type="float16",
                asr_options=None,
                vad_options=None,
-               model=None,
-               task="transcribe",
                download_root=None,
                threads=4):
     '''Load a Whisper model for inference.
@@ -304,10 +302,10 @@ class FasterWhisperPipeline(Pipeline):
             model_iterator, self.postprocess, postprocess_params)
         return final_iterator
 
-    def detect_segment_language(self, audio: np.ndarray, seg, min_drop_duration=0.1):
+    def detect_segment_language(self, audio: np.ndarray, seg, cache_encoding):
         f1 = int(seg['start'] * SAMPLE_RATE)
         f2 = int(seg['end'] * SAMPLE_RATE)
-        languages = self.detect_language(audio[f1:f2], seg)
+        languages = self.detect_language(audio[f1:f2], seg, cache_encoding)
         if len(languages) == 1:
             return [seg]
         segs_to_return = []
@@ -318,14 +316,14 @@ class FasterWhisperPipeline(Pipeline):
                 chunk_size = (seg["end"] - seg["start"]) / 2
                 subsegments = merge_intervals(seg["segments"], seg["weights"],
                                               chunk_size=chunk_size,
-                                              min_drop_duration=min_drop_duration)
+                                              min_drop_duration=0.1)
                 if len(subsegments) == 1:
                     segs_to_return.append(seg)
                     continue
                 for subseg in subsegments:
                     f1 = int(subseg["start"] * SAMPLE_RATE)
                     f2 = int(subseg["end"] * SAMPLE_RATE)
-                    languages = self.detect_language(audio[f1:f2], subseg)
+                    languages = self.detect_language(audio[f1:f2], subseg, cache_encoding)
                     if len(languages) == 1 or subseg["end"]-subseg["start"] <= 2:
                         segs_to_return.append(subseg)
                     else:
@@ -339,11 +337,12 @@ class FasterWhisperPipeline(Pipeline):
                 merged_segments.append(seg)
             else:
                 merged_segments[-1]["end"] = max(merged_segments[-1]["end"], seg["end"])
-        for seg in merged_segments:
-            del seg["encoding"]
-            f1 = int(seg["start"] * SAMPLE_RATE)
-            f2 = int(seg["end"] * SAMPLE_RATE)
-            self.cache_encoding(audio[f1:f2], seg)
+        if cache_encoding:
+            for seg in merged_segments:
+                del seg["encoding"]
+                f1 = int(seg["start"] * SAMPLE_RATE)
+                f2 = int(seg["end"] * SAMPLE_RATE)
+                self.cache_encoding(audio[f1:f2], seg)
         return merged_segments 
 
 
@@ -352,7 +351,7 @@ class FasterWhisperPipeline(Pipeline):
         num_workers=0, language=None, task=None, chunk_size=30,
         print_progress=False, combined_progress=False,
         get_prompt_per_lang: Optional[Callable[[str], str]] = None,
-        lang_reference="en",
+        lang_reference="en", cache_encoding = True,
     ) -> list:
         if isinstance(audio, str):
             audio = load_audio(audio)
@@ -374,6 +373,7 @@ class FasterWhisperPipeline(Pipeline):
             results = tqdm_concurrent.thread_map(self.detect_segment_language,
                                                  [audio]*len(vad_segments),
                                                  vad_segments,
+                                                 [cache_encoding]*len(vad_segments),
                                                  max_workers=num_threads,
                                                  disable=logging.root.level >= logging.INFO)
             for segments in results:
@@ -434,9 +434,14 @@ class FasterWhisperPipeline(Pipeline):
     ):
         def data(segments):
             for seg in segments:
+                generate_cache = False
+                if "encoding" not in seg:
+                    generate_cache = True
                 # For language mismatch, regenerates encoding.
-                if seg["encoding_lang"] != language and (
+                elif seg["encoding_lang"] != language and (
                         language == "en" or seg["encoding_lang"] == "en"):
+                    generate_cache = True
+                if generate_cache:
                     f1 = int(seg["start"] * SAMPLE_RATE)
                     f2 = int(seg["end"] * SAMPLE_RATE)
                     self.cache_encoding(audio[f1:f2], seg, language)
@@ -542,7 +547,7 @@ class FasterWhisperPipeline(Pipeline):
         seg["encoding"] = torch.as_tensor(encoder_output, device="cuda")
         seg["encoding_lang"] = lang 
 
-    def detect_language(self, audio: np.ndarray, seg):
+    def detect_language(self, audio: np.ndarray, seg, cache_encoding):
         feature = log_mel_spectrogram(audio[: N_SAMPLES], n_mels=80,
                                       padding=0 if audio.shape[0] >= N_SAMPLES else N_SAMPLES - audio.shape[0])
         encoder_output = self.i18n_model.encode(feature)
@@ -557,10 +562,11 @@ class FasterWhisperPipeline(Pipeline):
             detected_languages = [first_language]
         if seg:
             seg["language"] = detected_languages
-            if first_language == "en":
-                encoder_output = self.en_model.encode(feature)
-            seg["encoding"] = torch.as_tensor(encoder_output, device="cuda")
-            seg["encoding_lang"] = first_language 
+            if cache_encoding:
+                if first_language == "en":
+                    encoder_output = self.en_model.encode(feature)
+                seg["encoding"] = torch.as_tensor(encoder_output, device="cuda")
+                seg["encoding_lang"] = first_language
         return detected_languages 
         # In bilingual setting, prefers non-English output.
         if first_language == "en" and second_language_probability > 0.4:
