@@ -558,7 +558,7 @@ class FasterWhisperPipeline(Pipeline):
         first_language = language_token[2:-2]
         second_language_token, second_language_probability = results[0][1]
         second_language = second_language_token[2:-2]
-        if second_language_probability > 0.05:
+        if second_language_probability > 0.03:
             detected_languages = [first_language, second_language]
         else:
             detected_languages = [first_language]
