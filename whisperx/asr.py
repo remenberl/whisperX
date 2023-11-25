@@ -28,6 +28,7 @@ def find_numeral_symbol_tokens(tokenizer):
 
 def load_model(i18n_whisper_arch,
                en_whisper_arch,
+               allowed_languages,
                device,
                device_index=0,
                compute_type="float16",
@@ -112,6 +113,7 @@ def load_model(i18n_whisper_arch,
         i18n_model=i18n_model,
         en_model=en_model,
         vad=vad_model,
+        allowed_languages=allowed_languages,
         options=default_asr_options,
         tokenizer=tokenizer,
         suppress_numerals=suppress_numerals,
@@ -222,6 +224,7 @@ class FasterWhisperPipeline(Pipeline):
             i18n_model,
             en_model,
             vad,
+            allowed_languages: list[str],
             vad_params: dict,
             options: NamedTuple,
             tokenizer=None,
@@ -258,6 +261,7 @@ class FasterWhisperPipeline(Pipeline):
         self._vad_params = vad_params
         self.t2s = OpenCC('t2s')
         self.s2t = OpenCC('s2t')
+        self.allowed_languages = set(allowed_languages)
 
     def _sanitize_parameters(self, **kwargs):
         preprocess_kwargs = {}
@@ -320,25 +324,33 @@ class FasterWhisperPipeline(Pipeline):
                 if len(subsegments) == 1:
                     segs_to_return.append(seg)
                     continue
+                prev_lang = seg["language"]
                 for subseg in subsegments:
-                    f1 = int(subseg["start"] * SAMPLE_RATE)
-                    f2 = int(subseg["end"] * SAMPLE_RATE)
-                    languages = self.detect_language(audio[f1:f2], subseg, cache_encoding_device)
+                    if subseg["end"] - subseg["start"] <= 2 and prev_lang:
+                        languages = prev_lang
+                        subseg["language"] = languages
+                    else:
+                        f1 = int(subseg["start"] * SAMPLE_RATE)
+                        f2 = int(subseg["end"] * SAMPLE_RATE)
+                        languages = self.detect_language(audio[f1:f2], subseg, cache_encoding_device, cache=False)
                     if len(languages) == 1 or subseg["end"]-subseg["start"] <= 2:
                         segs_to_return.append(subseg)
                     else:
                         new_segs_to_split.append(subseg)
+                    prev_lang = languages
             segs_to_split = new_segs_to_split
         segs_to_return.sort(key=lambda seg: seg["start"])
         merged_segments = []
         prev_lang = ""
         for seg in segs_to_return:
-            if seg["language"] != prev_lang:
+            if seg["language"][0] != prev_lang:
                 merged_segments.append(seg)
+                prev_lang = seg["language"][0]
             else:
                 merged_segments[-1]["end"] = max(merged_segments[-1]["end"], seg["end"])
+                merged_segments[-1]["segments"] += seg["segments"]
+                merged_segments[-1]["weights"] += seg["weights"]
         for seg in merged_segments:
-            del seg["encoding"]
             f1 = int(seg["start"] * SAMPLE_RATE)
             f2 = int(seg["end"] * SAMPLE_RATE)
             self.cache_encoding(audio[f1:f2], seg, seg["language"], cache_encoding_device)
@@ -549,25 +561,36 @@ class FasterWhisperPipeline(Pipeline):
         seg["encoding"] = torch.as_tensor(encoder_output, device=device)
         seg["encoding_lang"] = lang 
 
-    def detect_language(self, audio: np.ndarray, seg, cache_encoding_device):
+    def detect_language(self, audio: np.ndarray, seg, cache_encoding_device, cache=True):
         feature = log_mel_spectrogram(audio[: N_SAMPLES], n_mels=80,
                                       padding=0 if audio.shape[0] >= N_SAMPLES else N_SAMPLES - audio.shape[0])
         encoder_output = self.i18n_model.encode(feature)
         results = self.i18n_model.model.detect_language(encoder_output)
-        language_token, _ = results[0][0]
-        first_language = language_token[2:-2]
-        second_language_token, second_language_probability = results[0][1]
-        second_language = second_language_token[2:-2]
-        if second_language_probability > 0.03:
-            detected_languages = [first_language, second_language]
-        else:
-            detected_languages = [first_language]
+        detected_languages = []
+        for lang_token, prob in results[0]:
+            lang = lang_token[2:-2]
+            if prob < 0.01 and detected_languages:
+                break
+            if lang not in self.allowed_languages:
+                continue
+            if not detected_languages:
+                detected_languages.append(lang)
+            else:
+                detected_languages.append(lang)
+                break
+        if not detected_languages:
+            detected_languages.append("en")
+        assert 0 < len(detected_languages) <= 2
+        # Swaps order
+        if len(detected_languages) == 2 and detected_languages[0] == "en":
+            detected_languages = [detected_languages[1], "en"]
         if seg:
             seg["language"] = detected_languages
-            if first_language == "en":
+            if detected_languages[0] == "en":
                 encoder_output = self.en_model.encode(feature)
-            seg["encoding"] = torch.as_tensor(encoder_output, device=cache_encoding_device)
-            seg["encoding_lang"] = first_language
+            if cache:
+                seg["encoding"] = torch.as_tensor(encoder_output, device=cache_encoding_device)
+                seg["encoding_lang"] = detected_languages[0]
         return detected_languages 
         # In bilingual setting, prefers non-English output.
         if first_language == "en" and second_language_probability > 0.4:
