@@ -62,6 +62,15 @@ def no_punct(text, word_count) -> bool:
     matches = re.findall("[,.?!，。？！]", text)
     return len(matches) == 0 or word_count / len(matches) >= 40
 
+def language_mismatch(seg, lang: str|None) -> bool:
+    if not lang:
+        return False
+    seg_lang = seg["language"]
+    if isinstance(seg_lang, str):
+        return seg_lang != lang
+    else:
+        return seg_lang[0] != lang
+
 def low_word_density(seg) -> bool:
     active_duration = seg["active_duration"]
     seg_duration = seg["end"] - seg["start"]
@@ -73,7 +82,7 @@ def high_compression_ratio(text) -> bool:
     text_bytes = text.encode("utf-8")
     return len(text_bytes) / len(zlib.compress(text_bytes)) > 2.4
 
-def maybe_reject_reason(seg) -> str:
+def maybe_reject_reason(seg, lang=None) -> str:
     text = seg["text"].strip()
     num_words = get_wordcount_obj(text).words
     seg["word_count"] = num_words
@@ -82,6 +91,8 @@ def maybe_reject_reason(seg) -> str:
         reason = "low_logprob"
     elif seg["no_speech_prob"] >= 0.9:
         reason = "no_speech"
+    elif language_mismatch(seg, lang):
+        reason = "language_mismatch"
     elif low_word_density(seg):
         reason = "low_word_density"
     elif high_compression_ratio(text):

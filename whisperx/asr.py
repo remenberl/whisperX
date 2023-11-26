@@ -531,6 +531,7 @@ class FasterWhisperPipeline(Pipeline):
                 "weights": vad_segments[idx]["weights"],
                 "logprob": round(out["logprob"], 3),
                 "no_speech_prob": round(out["no_speech_prob"], 3),
+                "language": tokenizer_lang,
             }
             seg["reason"] = maybe_reject_reason(seg)
             # Because seg has problem, encoding is returned for later reprocess.
