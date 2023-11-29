@@ -582,9 +582,6 @@ class FasterWhisperPipeline(Pipeline):
         if not detected_languages:
             detected_languages.append("en")
         assert 0 < len(detected_languages) <= 2
-        # Swaps order
-        if len(detected_languages) == 2 and detected_languages[0] == "en":
-            detected_languages = [detected_languages[1], "en"]
         if seg:
             seg["language"] = detected_languages
             if detected_languages[0] == "en":
