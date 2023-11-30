@@ -568,6 +568,7 @@ class FasterWhisperPipeline(Pipeline):
         encoder_output = self.i18n_model.encode(feature)
         results = self.i18n_model.model.detect_language(encoder_output)
         detected_languages = []
+        probs = []
         for lang_token, prob in results[0]:
             lang = lang_token[2:-2]
             if prob < 0.01 and detected_languages:
@@ -576,12 +577,18 @@ class FasterWhisperPipeline(Pipeline):
                 continue
             if not detected_languages:
                 detected_languages.append(lang)
+                probs.append(prob)
             else:
                 detected_languages.append(lang)
+                probs.append(prob)
                 break
         if not detected_languages:
             detected_languages.append("en")
+            probs.append(1.0)
         assert 0 < len(detected_languages) <= 2
+        # Swaps order
+        if len(detected_languages) == 2 and detected_languages[0] == "en" and probs[1] >= 0.3:
+            detected_languages = [detected_languages[1], "en"]
         if seg:
             seg["language"] = detected_languages
             if detected_languages[0] == "en":
