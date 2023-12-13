@@ -3,6 +3,13 @@ import zlib
 
 IDEOGRAPHIC_SPACE = 0x3000
 NUM_WORDS_PER_SECOND = 2.0
+NON_LATIN_LANGS = set([
+    "zh",
+    "zh_Hans",
+    "zh_Hant",
+    "ja",
+    "ko",
+])
 
 def is_asian(char):
     """Is the character Asian?"""
@@ -78,6 +85,21 @@ def low_word_density(seg) -> bool:
         return True
     return seg["word_count"] < seg_duration * NUM_WORDS_PER_SECOND
 
+def has_long_word(seg) -> bool:
+    threshold = 1.0 if seg["language"] in NON_LATIN_LANGS else 1.5
+    prev_word = None
+    for word in seg["alignment"]:
+        if len(word["word"]) == 0:
+            continue
+        if (word["end"]-word["start"]) >= threshold:
+            if not prev_word or prev_word[-1] not in [",", ".", "。", "!", "?"]:
+                continue
+            num_words = get_wordcount_obj(word["word"]).words
+            if word["end"] - word["start"] >= threshold * num_words:
+                return True
+        prev_word = word["word"]
+    return False
+
 def high_compression_ratio(text) -> bool:
     text_bytes = text.encode("utf-8")
     return len(text_bytes) / len(zlib.compress(text_bytes)) > 2.4
@@ -89,7 +111,8 @@ def maybe_reject_reason(seg, lang=None) -> str:
     # Ranked by how critical the problem is.
     if seg["logprob"] <= -1.0:
         reason = "low_logprob"
-    elif seg["no_speech_prob"] >= 0.9:
+    elif seg["no_speech_prob"] >= 0.85 or \
+            (seg["active_duration"] == 0 and seg["no_speech_prob"] >= 0.5):
         reason = "no_speech"
     elif language_mismatch(seg, lang):
         reason = "language_mismatch"
@@ -99,6 +122,8 @@ def maybe_reject_reason(seg, lang=None) -> str:
         reason = "high_compression_ratio"
     elif no_punct(text, num_words):
         reason = "no_punctuations"
+    elif has_long_word(seg):
+        reason = "long_word"
     else:
         reason = ""
     return reason
