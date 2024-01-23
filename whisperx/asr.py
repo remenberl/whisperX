@@ -131,6 +131,7 @@ class Tokenizer(faster_whisper.tokenizer.Tokenizer):
                 sequence.append(token.cpu().numpy())
             else:
                 sequence.insert(1, sequence[1])
+            break
 
         if self.task is not None:
             sequence.append(self.task)
@@ -641,7 +642,7 @@ class FasterWhisperPipeline(Pipeline):
             probs.append(1.0)
         assert 0 < len(detected_languages) <= 2
         # Swaps order
-        if len(detected_languages) == 2 and detected_languages[0] == "en":
+        if len(detected_languages) == 2 and detected_languages[0] == "en" and probs[1] >= 0.3:
             detected_languages = [detected_languages[1], "en"]
         if seg:
             seg["language"] = detected_languages
