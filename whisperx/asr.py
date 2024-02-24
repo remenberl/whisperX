@@ -87,6 +87,9 @@ def load_model(i18n_whisper_arch,
         "prepend_punctuations": "\"'“¿([{-",
         "append_punctuations": "\"'.。,，!！?？:：”)]}、",
         "suppress_numerals": False,
+        "max_new_tokens": None,
+        "clip_timestamps": "0",
+        "hallucination_silence_threshold": None,
     }
 
     if asr_options is not None:
