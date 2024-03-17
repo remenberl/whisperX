@@ -86,10 +86,7 @@ def low_word_density(seg) -> bool:
     return seg["word_count"] < seg_duration * NUM_WORDS_PER_SECOND
 
 def has_long_word(seg) -> bool:
-    if isinstance(seg["language"], str):
-        threshold = 1.0 if seg["language"] in NON_LATIN_LANGS else 1.5
-    else:
-        threshold = 1.0 if seg["language"][0] in NON_LATIN_LANGS else 1.5
+    threshold = 1.0 if seg["language"] in NON_LATIN_LANGS else 1.5
     prev_word = None
     for word in seg["alignment"]:
         if len(word["word"]) == 0:
