@@ -266,6 +266,9 @@ class FasterWhisperPipeline(Pipeline):
         self.s2t = OpenCC('s2t')
         self.allowed_languages = set(allowed_languages)
 
+        # For missing sentences 
+        self.cache_text_segments = {}
+
     def _sanitize_parameters(self, **kwargs):
         preprocess_kwargs = {}
         if "tokenizer" in kwargs:
@@ -379,9 +382,14 @@ class FasterWhisperPipeline(Pipeline):
             onset=self._vad_params["vad_onset"],
             offset=self._vad_params["vad_offset"],
         )
+
         vad_segments_per_lang = {}
         if self.tokenizer:
-            vad_segments_per_lang[language] = vad_segments
+            vad_segments_per_lang[language] = []
+            for idx, seg in enumerate(vad_segments):
+                # add segment index
+                seg["seg_idx"] = idx 
+                vad_segments_per_lang[language].append(seg)
         else:
             logging.info("\tDetecting language for segments")
             results = tqdm_concurrent.thread_map(self.detect_segment_language,
@@ -390,13 +398,18 @@ class FasterWhisperPipeline(Pipeline):
                                                  [cache_encoding_device]*len(vad_segments),
                                                  max_workers=num_threads,
                                                  disable=logging.root.level >= logging.INFO)
+            idx = 0
             for segments in results:
                 for seg in segments:
+                    # add segment index
+                    seg["seg_idx"] = idx
+                    idx += 1
                     lang = seg["language"][0]
                     if lang in vad_segments_per_lang:
                         vad_segments_per_lang[lang].append(seg)
                     else:
                         vad_segments_per_lang[lang] = [seg]
+        
         results = []
         for lang, vad_segments in vad_segments_per_lang.items():
             logging.info(f"\tGetting prompts for {lang}")
@@ -410,12 +423,18 @@ class FasterWhisperPipeline(Pipeline):
                 new_options = faster_whisper.transcribe.TranscriptionOptions(
                     **new_asr_options)
                 self.options = new_options
-            logging.info(f"\tTranscribing for {lang}")
+            logging.info(f"\tTranscribing for {lang}, {len(vad_segments)} segments")
             results.append(
                 self.transcribe_per_lang(audio, vad_segments, batch_size,
                                          num_workers, lang, task,
                                          print_progress, combined_progress,
                                          cache_encoding_device))
+
+        # NOTE: save segment into a dict (idx -> text segment) for later reprocess.
+        for r in results:
+            segments = r["segments"]
+            for seg in segments:
+                self.cache_text_segments[seg["seg_idx"]] = seg
         return results
 
     def transcribe_per_lang_with_split(
@@ -442,6 +461,27 @@ class FasterWhisperPipeline(Pipeline):
         for i, seg in enumerate(results["segments"]):
             output_segments[to_orig_map[i]].append(seg)
         return {"segments": output_segments, "language": results["language"]}
+
+    def transcribe_per_lang_with_join(
+        self, audio, segments, batch_size, language, cache_encoding_device):
+        seg1 = segments[0]
+        seg2 = segments[1]
+        joined_seg = {
+            "seg_idx": None,
+            "start": seg1["start"],
+            "end": seg2["end"],
+            "segments": seg1["segments"] + seg2["segments"],
+            "weights": seg1["weights"] + seg2["weights"],
+        }
+        seg3 = segments[2]
+        if seg3 is not None:
+            joined_seg["end"] = seg3["end"]
+            joined_seg["segments"] += seg3["segments"]
+            joined_seg["weights"] += seg3["weights"]
+
+        results = self.transcribe_per_lang(
+            audio, [joined_seg], batch_size, num_workers=0, language=language, task=None, cache_encoding_device=cache_encoding_device)
+        return results["segments"][0]
 
     def transcribe_per_lang(
         self, audio, vad_segments, batch_size=None,
@@ -506,6 +546,7 @@ class FasterWhisperPipeline(Pipeline):
                 alignment = alignment[0]
             vad_start = round(vad_segments[idx]['start'], 3)
             vad_end = round(vad_segments[idx]['end'], 3)
+            vad_idx = vad_segments[idx]['seg_idx']
             active_duration = 0
             for word in alignment:
                 word["start"] -= PADDED_LEFT_SECOND
@@ -524,6 +565,7 @@ class FasterWhisperPipeline(Pipeline):
                     continue
                 word_duration = word["end"] - word["start"]
                 active_duration += word_duration
+
             seg = {
                 "text": text,
                 "start": vad_start,
@@ -535,6 +577,7 @@ class FasterWhisperPipeline(Pipeline):
                 "logprob": round(out["logprob"], 3),
                 "no_speech_prob": round(out["no_speech_prob"], 3),
                 "language": tokenizer_lang,
+                "seg_idx": vad_idx,
             }
             seg["reason"] = maybe_reject_reason(seg)
             # Because seg has problem, encoding is returned for later reprocess.
