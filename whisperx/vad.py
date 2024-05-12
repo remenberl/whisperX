@@ -165,7 +165,7 @@ class Binarize:
                         start = t
                         is_active = True
                         if weights:
-                            weights[-1] /= math.exp(t - intervals[-1][1]) 
+                            weights[-1] /= math.exp(min(100, t - intervals[-1][1])) 
             # if active at the end, add final region
             if is_active:
                 intervals.append([start, t])
